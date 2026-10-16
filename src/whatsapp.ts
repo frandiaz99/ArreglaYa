@@ -1,15 +1,19 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Request, Response, Router } from "express";
 import express from "express";
-import { diagnose, type Diagnosis, type ImageInput } from "./diagnose.js";
-import { findProviders, formatAsText } from "./assistant.js";
+import type { ImageInput } from "./claude.js";
+import { diagnose, type Diagnosis } from "./diagnose.js";
+import { buildGuide, canOfferGuide, formatGuideAsText } from "./guide.js";
+import { buildResult, formatAsText } from "./assistant.js";
 import type { Location } from "./ranking.js";
 
 const GRAPH = "https://graph.facebook.com/v21.0";
 const { WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET } = process.env;
 
 /** Estado mínimo por conversación. En producción: Redis o la base de datos. */
-const sessions = new Map<string, { diagnosis?: Diagnosis; location?: Location }>();
+const sessions = new Map<string, { diagnosis?: Diagnosis; image?: ImageInput | null; location?: Location }>();
+
+const GUIDE_KEYWORD = /^\s*gu[ií]a\s*$/i;
 
 async function sendText(to: string, body: string): Promise<void> {
   const res = await fetch(`${GRAPH}/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
@@ -55,8 +59,17 @@ async function handleMessage(msg: WaMessage): Promise<void> {
       await sendText(msg.from, "¡Gracias! Ahora mandame una foto de lo que hay que arreglar 📷");
       return;
     }
-    const diagnosis = session.diagnosis;
-    await sendText(msg.from, formatAsText({ diagnosis, ...findProviders(diagnosis, session.location) }));
+    await sendText(msg.from, formatAsText(buildResult(session.diagnosis, session.location)));
+    return;
+  }
+
+  if (msg.type === "text" && msg.text && GUIDE_KEYWORD.test(msg.text.body)) {
+    if (!session.diagnosis || !canOfferGuide(session.diagnosis)) {
+      await sendText(msg.from, "Primero mandame una foto de lo que querés arreglar 📷");
+      return;
+    }
+    await sendText(msg.from, "Dale, te armo la guía… 🔧");
+    await sendText(msg.from, formatGuideAsText(await buildGuide(session.diagnosis, session.image ?? null)));
     return;
   }
 
@@ -74,7 +87,8 @@ async function handleMessage(msg: WaMessage): Promise<void> {
 
   const diagnosis = await diagnose(image, text);
   session.diagnosis = diagnosis;
-  await sendText(msg.from, formatAsText({ diagnosis, ...findProviders(diagnosis, session.location ?? null) }));
+  session.image = image;
+  await sendText(msg.from, formatAsText(buildResult(diagnosis, session.location ?? null)));
 }
 
 export function whatsappRouter(): Router {

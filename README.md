@@ -27,6 +27,8 @@ Abrí `http://localhost:3000` en el celular o en la PC, subí una foto (o descri
 | Archivo | Qué hace |
 |---|---|
 | `src/diagnose.ts` | Manda la foto a Claude y recibe un diagnóstico **estructurado** (validado con Zod): oficio, urgencia, complejidad, advertencia de seguridad, si se puede resolver solo, y el mensaje para el usuario. |
+| `src/guide.ts` | Modo **"Hacelo vos"**: guía paso a paso con herramientas, materiales (con link de búsqueda en Mercado Libre), cómo comprobar el arreglo y cuándo dejarlo y llamar a un profesional. |
+| `src/claude.ts` | Cliente de Claude compartido: salida JSON validada, fallback ante rechazos, cache del prompt. |
 | `src/ranking.ts` | Filtra y ordena profesionales. Lógica pura, cubierta por tests. |
 | `src/db.ts` | SQLite (`node:sqlite`, sin dependencias nativas) con profesionales y reseñas + datos demo. |
 | `src/assistant.ts` | Orquesta: diagnóstico → ¿falta ubicación? → ranking → respuesta. |
@@ -48,6 +50,18 @@ Para cada profesional del oficio correcto que cubre tu zona:
 ### Seguridad del diagnóstico
 
 El prompt obliga a dar primero la instrucción de seguridad si hay riesgo (cerrar la llave de paso, cortar la térmica, ventilar, llamar al 911 o a la emergencia de gas) y nunca sugiere que el usuario toque instalaciones de gas o tableros. No inventa precios: en Argentina cambian demasiado rápido y deben salir de datos reales de la plataforma.
+
+### Modo "Hacelo vos"
+
+Si el diagnóstico dice que el arreglo es seguro para alguien sin experiencia, el usuario elige entre **🔧 Hacelo vos** y **👷 Que venga alguien** (en WhatsApp: responder `GUIA` o mandar la ubicación). La guía tiene tres capas de seguridad:
+
+1. El diagnóstico marca `diy_possible` solo si es seguro.
+2. El servidor (`canOfferGuide`) **nunca** ofrece guía para gas ni para emergencias, diga lo que diga el modelo.
+3. Al armar la guía, el modelo vuelve a evaluar (`safe_to_diy`) y, si no es seguro, deriva a profesionales.
+
+Después de la guía siempre queda el botón "No pude, que venga alguien": el que intentó y no pudo es un cliente con alta intención.
+
+**Monetización posible:** los links de materiales hoy son búsquedas comunes de Mercado Libre; se pueden convertir en links de afiliado una vez aprobado en su programa de afiliados.
 
 ## Conectar WhatsApp
 

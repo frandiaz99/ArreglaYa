@@ -1,4 +1,6 @@
-import { diagnose, type Diagnosis, type ImageInput } from "./diagnose.js";
+import type { ImageInput } from "./claude.js";
+import { diagnose, type Diagnosis } from "./diagnose.js";
+import { canOfferGuide } from "./guide.js";
 import { providersByTrade } from "./db.js";
 import { rankProviders, type Location, type RankedProvider } from "./ranking.js";
 
@@ -6,6 +8,7 @@ export type AssistantResult = {
   diagnosis: Diagnosis;
   providers: RankedProvider[];
   needsLocation: boolean;
+  guideAvailable: boolean;
 };
 
 const TRADE_LABEL: Record<string, string> = {
@@ -27,10 +30,14 @@ export async function handleRequest(
   location: Location | null,
 ): Promise<AssistantResult> {
   const diagnosis = await diagnose(image, text);
-  return { diagnosis, ...findProviders(diagnosis, location) };
+  return buildResult(diagnosis, location);
 }
 
-export function findProviders(diagnosis: Diagnosis, location: Location | null) {
+export function buildResult(diagnosis: Diagnosis, location: Location | null): AssistantResult {
+  return { diagnosis, ...findProviders(diagnosis, location), guideAvailable: canOfferGuide(diagnosis) };
+}
+
+function findProviders(diagnosis: Diagnosis, location: Location | null) {
   const searchable = diagnosis.is_home_repair && diagnosis.trade !== "otro" && !diagnosis.question_for_user;
   if (!searchable) return { providers: [], needsLocation: false };
   if (!location) return { providers: [], needsLocation: true };
@@ -41,16 +48,17 @@ export function findProviders(diagnosis: Diagnosis, location: Location | null) {
 }
 
 /** Formato de texto plano, para WhatsApp. */
-export function formatAsText({ diagnosis, providers, needsLocation }: AssistantResult): string {
+export function formatAsText({ diagnosis, providers, needsLocation, guideAvailable }: AssistantResult): string {
   const parts: string[] = [];
   if (diagnosis.safety_warning) parts.push(`⚠️ *${diagnosis.safety_warning}*`);
   parts.push(diagnosis.reply_message);
   if (diagnosis.question_for_user) parts.push(diagnosis.question_for_user);
-  if (diagnosis.diy_possible && diagnosis.diy_tips.length) {
-    parts.push("Si querés intentarlo vos:\n" + diagnosis.diy_tips.map((t) => `• ${t}`).join("\n"));
+  if (guideAvailable) {
+    parts.push("🔧 Esto lo podés arreglar vos. Respondé *GUIA* y te paso los pasos y los materiales.");
   }
   if (needsLocation) {
-    parts.push(`Para recomendarte un ${TRADE_LABEL[diagnosis.trade]} cerca, mandame tu ubicación 📍`);
+    const prefix = guideAvailable ? "Si preferís que venga alguien" : `Para recomendarte un ${TRADE_LABEL[diagnosis.trade]} cerca`;
+    parts.push(`${prefix}, mandame tu ubicación 📍`);
   } else if (providers.length) {
     parts.push(
       `Te recomiendo estos ${TRADE_LABEL[diagnosis.trade]}s:\n\n` +

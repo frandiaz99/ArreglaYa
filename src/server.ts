@@ -2,7 +2,9 @@ import express from "express";
 import multer from "multer";
 import Anthropic from "@anthropic-ai/sdk";
 import { handleRequest } from "./assistant.js";
-import { DiagnosisRefusedError, type ImageInput } from "./diagnose.js";
+import { ModelRefusedError, type ImageInput } from "./claude.js";
+import { DiagnosisSchema } from "./diagnose.js";
+import { buildGuide, canOfferGuide } from "./guide.js";
 import { seedDemoProviders } from "./db.js";
 import { whatsappRouter } from "./whatsapp.js";
 
@@ -27,38 +29,59 @@ app.use(
 app.use(express.static("public"));
 app.use("/webhooks/whatsapp", whatsappRouter());
 
-app.post("/api/chat", upload.single("photo"), async (req, res) => {
-  let image: ImageInput | null = null;
-  if (req.file) {
-    if (!IMAGE_TYPES.has(req.file.mimetype)) {
-      res.status(400).json({ error: "Formato de imagen no soportado (usá JPG, PNG, WEBP o GIF)" });
-      return;
-    }
-    image = { data: req.file.buffer, mediaType: req.file.mimetype as ImageInput["mediaType"] };
-  }
-  const text = typeof req.body.text === "string" ? req.body.text : undefined;
-  if (!image && !text?.trim()) {
-    res.status(400).json({ error: "Mandá una foto o describí el problema" });
-    return;
-  }
-  const lat = Number(req.body.lat);
-  const lng = Number(req.body.lng);
-  const location = Number.isFinite(lat) && Number.isFinite(lng) && req.body.lat !== "" ? { lat, lng } : null;
+class BadRequest extends Error {}
 
+function imageFrom(file: Express.Multer.File | undefined): ImageInput | null {
+  if (!file) return null;
+  if (!IMAGE_TYPES.has(file.mimetype)) throw new BadRequest("Formato de imagen no soportado (usá JPG, PNG, WEBP o GIF)");
+  return { data: file.buffer, mediaType: file.mimetype as ImageInput["mediaType"] };
+}
+
+function sendError(res: express.Response, err: unknown): void {
+  if (err instanceof BadRequest) {
+    res.status(400).json({ error: err.message });
+  } else if (err instanceof ModelRefusedError) {
+    res.status(422).json({ error: "No pude analizar esa imagen. Probá con otra foto." });
+  } else if (err instanceof Anthropic.RateLimitError) {
+    res.status(503).json({ error: "Hay mucha demanda, probá en unos segundos." });
+  } else if (err instanceof Anthropic.AuthenticationError) {
+    console.error("Credenciales de Claude inválidas");
+    res.status(500).json({ error: "El servicio de IA no está configurado." });
+  } else {
+    console.error(err);
+    res.status(500).json({ error: "Error inesperado" });
+  }
+}
+
+app.post("/api/chat", upload.single("photo"), async (req, res) => {
   try {
+    const image = imageFrom(req.file);
+    const text = typeof req.body.text === "string" ? req.body.text : undefined;
+    if (!image && !text?.trim()) throw new BadRequest("Mandá una foto o describí el problema");
+    const lat = Number(req.body.lat);
+    const lng = Number(req.body.lng);
+    const location = req.body.lat && Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
     res.json(await handleRequest(image, text, location));
   } catch (err) {
-    if (err instanceof DiagnosisRefusedError) {
-      res.status(422).json({ error: "No pude analizar esa imagen. Probá con otra foto." });
-    } else if (err instanceof Anthropic.RateLimitError) {
-      res.status(503).json({ error: "Hay mucha demanda, probá en unos segundos." });
-    } else if (err instanceof Anthropic.AuthenticationError) {
-      console.error("Credenciales de Claude inválidas o ausentes");
-      res.status(500).json({ error: "El servicio de IA no está configurado." });
-    } else {
-      console.error(err);
-      res.status(500).json({ error: "Error inesperado" });
+    sendError(res, err);
+  }
+});
+
+// Guía "Hacelo vos": recibe el diagnóstico previo (y la foto otra vez, para que la guía sea precisa)
+app.post("/api/guide", upload.single("photo"), async (req, res) => {
+  try {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(String(req.body.diagnosis));
+    } catch {
+      throw new BadRequest("Diagnóstico inválido");
     }
+    const parsed = DiagnosisSchema.safeParse(raw);
+    if (!parsed.success) throw new BadRequest("Diagnóstico inválido");
+    if (!canOfferGuide(parsed.data)) throw new BadRequest("Este arreglo conviene hacerlo con un profesional");
+    res.json(await buildGuide(parsed.data, imageFrom(req.file)));
+  } catch (err) {
+    sendError(res, err);
   }
 });
 

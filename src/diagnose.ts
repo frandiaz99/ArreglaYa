@@ -1,6 +1,5 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
+import { askStructured, type ImageInput } from "./claude.js";
 
 export const TRADES = [
   "plomero",
@@ -50,45 +49,13 @@ El usuario te manda una foto (y a veces un texto) de algo que se rompió o funci
 No inventes precios: los costos dependen de cada profesional y cambian rápido.
 reply_message: 2 a 4 oraciones, tono cercano, sin tecnicismos innecesarios. No listes profesionales: el sistema los agrega después.`;
 
-const client = new Anthropic();
-const MODEL = process.env.CLAUDE_MODEL ?? "claude-opus-5-5";
-
-export type ImageInput = {
-  data: Buffer;
-  mediaType: "image/jpeg" | "image/png" | "image/webp" | "image/gif";
-};
-
-export class DiagnosisRefusedError extends Error {}
-
-export async function diagnose(image: ImageInput | null, text: string | undefined): Promise<Diagnosis> {
-  const content: Anthropic.Beta.BetaContentBlockParam[] = [];
-  if (image) {
-    content.push({
-      type: "image",
-      source: { type: "base64", media_type: image.mediaType, data: image.data.toString("base64") },
-    });
-  }
-  content.push({
-    type: "text",
+export function diagnose(image: ImageInput | null, text: string | undefined): Promise<Diagnosis> {
+  return askStructured({
+    schema: DiagnosisSchema,
+    system: SYSTEM_PROMPT,
+    image,
     text: text?.trim() || "Mirá esta foto. ¿Qué problema hay y a quién tengo que llamar?",
-  });
-
-  const response = await client.beta.messages.parse({
-    model: MODEL,
-    max_tokens: 16000,
-    betas: ["server-side-fallback-2026-07-01"],
-    fallbacks: "default",
     // Respuesta de chat: priorizamos latencia
-    output_config: { effort: "low", format: zodOutputFormat(DiagnosisSchema) },
-    system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
-    messages: [{ role: "user", content }],
+    effort: "low",
   });
-
-  if (response.stop_reason === "refusal") {
-    throw new DiagnosisRefusedError(response.stop_details?.explanation ?? "El modelo rechazó la solicitud");
-  }
-  if (!response.parsed_output) {
-    throw new Error(`No se pudo interpretar el diagnóstico (stop_reason: ${response.stop_reason})`);
-  }
-  return response.parsed_output;
 }

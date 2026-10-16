@@ -26,6 +26,12 @@
   input[type=text] { flex:1; min-width:0; padding:12px; border-radius:12px; border:1px solid var(--line); background:var(--card); color:var(--ink); font:inherit; }
   button, label.btn { border:none; border-radius:12px; padding:12px 14px; font:inherit; font-weight:600; cursor:pointer; background:var(--accent); color:#fff; }
   label.btn { background:var(--card); color:var(--ink); border:1px solid var(--line); }
+  .choices { display:flex; flex-wrap:wrap; gap:8px; align-self:flex-start; }
+  .choices button.alt { background:var(--card); color:var(--ink); border:1px solid var(--line); }
+  .guide h3 { margin:0 0 4px; font-size:17px; } .guide h4 { margin:12px 0 4px; font-size:14px; }
+  .guide ul, .guide ol { margin:0; padding-left:20px; white-space:normal; } .guide li { margin:3px 0; }
+  .guide small { color:var(--muted); } .guide a { color:var(--accent); }
+  .guide .stop { margin-top:12px; padding:8px 10px; border-radius:10px; border:1px solid var(--accent); }
   #loc { font-size:13px; color:var(--muted); }
   #preview { font-size:13px; color:var(--muted); }
 </style>
@@ -90,19 +96,80 @@
       const data = await res.json();
       wait.remove();
       if (!res.ok) { bubble("").textContent = data.error; return; }
-      render(data);
+      render(data, file);
     } catch { wait.textContent = "No me pude conectar. ¿Probás de nuevo?"; }
   };
 
-  function render({ diagnosis: d, providers }) {
+  function render({ diagnosis: d, providers, guideAvailable }, file) {
     if (d.safety_warning) bubble("warn").textContent = "⚠️ " + d.safety_warning;
     const m = bubble("");
     m.textContent = d.reply_message;
     if (d.question_for_user) line(m, "p", d.question_for_user);
-    if (d.diy_possible && d.diy_tips.length) {
-      line(m, "p", "Si querés intentarlo vos:");
-      const ul = document.createElement("ul"); d.diy_tips.forEach((t) => line(ul, "li", t)); m.appendChild(ul);
+    if (!guideAvailable) { renderProviders(providers); return; }
+
+    const choices = document.createElement("div"); choices.className = "choices";
+    const diy = line(choices, "button", "🔧 Hacelo vos (guía paso a paso)");
+    const pro = line(choices, "button", "👷 Prefiero que venga alguien"); pro.className = "alt";
+    log.appendChild(choices);
+    diy.onclick = () => { choices.remove(); requestGuide(d, file, providers); };
+    pro.onclick = () => { choices.remove(); renderProviders(providers); };
+  }
+
+  async function requestGuide(d, file, providers) {
+    const wait = bubble(""); wait.textContent = "Armando la guía… 🔧";
+    const fd = new FormData();
+    fd.append("diagnosis", JSON.stringify(d));
+    if (file) fd.append("photo", file);
+    try {
+      const res = await fetch("/api/guide", { method: "POST", body: fd });
+      const g = await res.json();
+      wait.remove();
+      if (!res.ok) { bubble("").textContent = g.error; renderProviders(providers); return; }
+      renderGuide(g, providers);
+    } catch { wait.textContent = "No me pude conectar. ¿Probás de nuevo?"; }
+  }
+
+  function list(parent, tag, items, fmt = (x) => x) {
+    const l = document.createElement(tag); items.forEach((i) => line(l, "li", fmt(i))); parent.appendChild(l); return l;
+  }
+
+  function renderGuide(g, providers) {
+    if (!g.safe_to_diy) {
+      bubble("warn").textContent = "Pensándolo mejor, esto conviene que lo haga un profesional: " + (g.not_safe_reason || "");
+      renderProviders(providers);
+      return;
     }
+    const b = bubble("guide");
+    line(b, "h3", "🔧 " + g.title);
+    line(b, "small", `Dificultad: ${g.difficulty} · ~${g.estimated_minutes} min`);
+    line(b, "h4", "⚠️ Antes de empezar"); list(b, "ul", g.safety_first);
+    if (g.tools.length) { line(b, "h4", "🧰 Herramientas"); list(b, "ul", g.tools); }
+    if (g.materials.length) {
+      line(b, "h4", "🛒 Materiales");
+      const ul = document.createElement("ul");
+      g.materials.forEach((mat) => {
+        const li = line(ul, "li", `${mat.name} (${mat.spec}) ×${mat.quantity} · `);
+        const a = line(li, "a", "buscar en Mercado Libre"); a.href = mat.buy_url; a.target = "_blank"; a.rel = "noopener";
+      });
+      b.appendChild(ul);
+    }
+    line(b, "h4", "📋 Pasos");
+    const ol = document.createElement("ol");
+    g.steps.forEach((s) => { const li = line(ol, "li", s.instruction); if (s.tip) { li.appendChild(document.createElement("br")); line(li, "small", "💡 " + s.tip); } });
+    b.appendChild(ol);
+    line(b, "h4", "✅ Para comprobar"); line(b, "div", g.how_to_check);
+    const stop = line(b, "div", ""); stop.className = "stop";
+    line(stop, "b", "🛑 Dejalo y llamá a un profesional si:"); list(stop, "ul", g.call_a_pro_if);
+
+    if (providers.length) {
+      const choices = document.createElement("div"); choices.className = "choices";
+      const pro = line(choices, "button", "👷 No pude, que venga alguien"); pro.className = "alt";
+      log.appendChild(choices);
+      pro.onclick = () => { choices.remove(); renderProviders(providers); };
+    }
+  }
+
+  function renderProviders(providers) {
     if (providers.length) {
       const p = bubble("");
       line(p, "div", "Te recomiendo:");
