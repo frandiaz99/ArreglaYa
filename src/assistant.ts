@@ -1,15 +1,26 @@
+import { randomUUID } from "node:crypto";
 import type { ImageInput } from "./claude.js";
 import { diagnose, type Diagnosis } from "./diagnose.js";
-import { canOfferGuide } from "./guide.js";
+import { buildGuide, canOfferGuide, type GuideWithLinks } from "./guide.js";
 import { providersByTrade } from "./db.js";
+import { TtlCache } from "./limits.js";
 import { rankProviders, type Location, type RankedProvider } from "./ranking.js";
 
 export type AssistantResult = {
+  diagnosisId: string;
   diagnosis: Diagnosis;
   providers: RankedProvider[];
   needsLocation: boolean;
   guideAvailable: boolean;
 };
+
+/**
+ * Los diagnósticos quedan en el servidor: la guía se pide por ID, así nadie puede
+ * fabricar un diagnóstico a mano ni hace falta volver a subir la foto.
+ * En producción: Redis o la base de datos.
+ */
+type StoredDiagnosis = { diagnosis: Diagnosis; image: ImageInput | null; guide?: Promise<GuideWithLinks> };
+const diagnoses = new TtlCache<string, StoredDiagnosis>(60 * 60 * 1000, 5000);
 
 const TRADE_LABEL: Record<string, string> = {
   plomero: "plomero",
@@ -30,11 +41,38 @@ export async function handleRequest(
   location: Location | null,
 ): Promise<AssistantResult> {
   const diagnosis = await diagnose(image, text);
-  return buildResult(diagnosis, location);
+  const diagnosisId = randomUUID();
+  diagnoses.set(diagnosisId, { diagnosis, image });
+  return buildResult(diagnosisId, diagnosis, location);
 }
 
-export function buildResult(diagnosis: Diagnosis, location: Location | null): AssistantResult {
-  return { diagnosis, ...findProviders(diagnosis, location), guideAvailable: canOfferGuide(diagnosis) };
+export function getDiagnosis(diagnosisId: string): Diagnosis | undefined {
+  return diagnoses.get(diagnosisId)?.diagnosis;
+}
+
+export class GuideNotAvailableError extends Error {}
+
+/** Devuelve la guía (cacheada si ya se generó) o lanza GuideNotAvailableError. */
+export async function getGuide(diagnosisId: string, beforeGenerate: () => void): Promise<GuideWithLinks> {
+  const stored = diagnoses.get(diagnosisId);
+  if (!stored) throw new GuideNotAvailableError("El diagnóstico venció. Mandá la foto de nuevo.");
+  if (!canOfferGuide(stored.diagnosis)) throw new GuideNotAvailableError("Este arreglo conviene hacerlo con un profesional");
+  if (!stored.guide) {
+    beforeGenerate();
+    // Guardamos la promesa: dos pedidos simultáneos comparten una sola llamada a la API
+    stored.guide = buildGuide(stored.diagnosis, stored.image);
+    stored.guide.catch(() => (stored.guide = undefined));
+  }
+  return stored.guide;
+}
+
+export function buildResult(diagnosisId: string, diagnosis: Diagnosis, location: Location | null): AssistantResult {
+  return {
+    diagnosisId,
+    diagnosis,
+    ...findProviders(diagnosis, location),
+    guideAvailable: canOfferGuide(diagnosis),
+  };
 }
 
 function findProviders(diagnosis: Diagnosis, location: Location | null) {

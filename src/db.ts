@@ -1,10 +1,6 @@
-import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { db } from "./database.js";
 import { TRADES, type Trade } from "./diagnose.js";
 import type { Provider } from "./ranking.js";
-
-mkdirSync("data", { recursive: true });
-const db = new DatabaseSync("data/arreglaya.db");
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS providers (

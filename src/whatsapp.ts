@@ -2,16 +2,22 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Request, Response, Router } from "express";
 import express from "express";
 import type { ImageInput } from "./claude.js";
-import { diagnose, type Diagnosis } from "./diagnose.js";
-import { buildGuide, canOfferGuide, formatGuideAsText } from "./guide.js";
-import { buildResult, formatAsText } from "./assistant.js";
+import { BudgetExceededError } from "./budget.js";
+import { buildResult, formatAsText, getDiagnosis, getGuide, GuideNotAvailableError, handleRequest } from "./assistant.js";
+import { formatGuideAsText } from "./guide.js";
+import { diagnosisLimiter, guideLimiter, MAX_TEXT_CHARS, RateLimitedError, TtlCache } from "./limits.js";
 import type { Location } from "./ranking.js";
 
 const GRAPH = "https://graph.facebook.com/v21.0";
 const { WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET } = process.env;
+const DAY = 24 * 60 * 60 * 1000;
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
-/** Estado mínimo por conversación. En producción: Redis o la base de datos. */
-const sessions = new Map<string, { diagnosis?: Diagnosis; image?: ImageInput | null; location?: Location }>();
+/** Estado mínimo por conversación; vence a las 24 h sin mensajes. En producción: Redis o la base de datos. */
+const sessions = new TtlCache<string, { diagnosisId?: string; location?: Location }>(DAY, 10_000);
+/** Meta reintenta webhooks: sin esto, un reintento se procesaría (y cobraría) dos veces. */
+const seenMessageIds = new TtlCache<string, true>(DAY, 50_000);
 
 const GUIDE_KEYWORD = /^\s*gu[ií]a\s*$/i;
 
@@ -24,14 +30,18 @@ async function sendText(to: string, body: string): Promise<void> {
   if (!res.ok) console.error("WhatsApp send failed", res.status, await res.text());
 }
 
+class UnsupportedImageError extends Error {}
+
 async function downloadMedia(mediaId: string): Promise<ImageInput> {
   const auth = { Authorization: `Bearer ${WHATSAPP_TOKEN}` };
   const meta = (await (await fetch(`${GRAPH}/${mediaId}`, { headers: auth })).json()) as {
     url: string;
-    mime_type: ImageInput["mediaType"];
+    mime_type: string;
+    file_size: number;
   };
+  if (!IMAGE_TYPES.has(meta.mime_type) || meta.file_size > MAX_IMAGE_BYTES) throw new UnsupportedImageError();
   const file = await fetch(meta.url, { headers: auth });
-  return { data: Buffer.from(await file.arrayBuffer()), mediaType: meta.mime_type };
+  return { data: Buffer.from(await file.arrayBuffer()), mediaType: meta.mime_type as ImageInput["mediaType"] };
 }
 
 function validSignature(req: Request & { rawBody?: Buffer }): boolean {
@@ -42,6 +52,7 @@ function validSignature(req: Request & { rawBody?: Buffer }): boolean {
 }
 
 type WaMessage = {
+  id: string;
   from: string;
   type: string;
   text?: { body: string };
@@ -51,44 +62,64 @@ type WaMessage = {
 
 async function handleMessage(msg: WaMessage): Promise<void> {
   const session = sessions.get(msg.from) ?? {};
-  sessions.set(msg.from, session);
+  sessions.set(msg.from, session); // renueva el vencimiento
+  const diagnosis = session.diagnosisId ? getDiagnosis(session.diagnosisId) : undefined;
 
   if (msg.type === "location" && msg.location) {
     session.location = { lat: msg.location.latitude, lng: msg.location.longitude };
-    if (!session.diagnosis) {
+    if (!session.diagnosisId || !diagnosis) {
       await sendText(msg.from, "¡Gracias! Ahora mandame una foto de lo que hay que arreglar 📷");
       return;
     }
-    await sendText(msg.from, formatAsText(buildResult(session.diagnosis, session.location)));
+    await sendText(msg.from, formatAsText(buildResult(session.diagnosisId, diagnosis, session.location)));
     return;
   }
 
   if (msg.type === "text" && msg.text && GUIDE_KEYWORD.test(msg.text.body)) {
-    if (!session.diagnosis || !canOfferGuide(session.diagnosis)) {
+    if (!session.diagnosisId) {
       await sendText(msg.from, "Primero mandame una foto de lo que querés arreglar 📷");
       return;
     }
-    await sendText(msg.from, "Dale, te armo la guía… 🔧");
-    await sendText(msg.from, formatGuideAsText(await buildGuide(session.diagnosis, session.image ?? null)));
+    const guide = await getGuide(session.diagnosisId, () => {
+      guideLimiter.hit(`wa:${msg.from}`);
+      void sendText(msg.from, "Dale, te armo la guía… 🔧");
+    });
+    await sendText(msg.from, formatGuideAsText(guide));
     return;
   }
 
   let image: ImageInput | null = null;
   let text: string | undefined;
   if (msg.type === "image" && msg.image) {
+    diagnosisLimiter.hit(`wa:${msg.from}`); // antes de descargar la foto
     image = await downloadMedia(msg.image.id);
     text = msg.image.caption;
   } else if (msg.type === "text" && msg.text) {
+    diagnosisLimiter.hit(`wa:${msg.from}`);
     text = msg.text.body;
   } else {
     await sendText(msg.from, "Por ahora entiendo fotos, texto y ubicación. Mandame una foto del problema 📷");
     return;
   }
 
-  const diagnosis = await diagnose(image, text);
-  session.diagnosis = diagnosis;
-  session.image = image;
-  await sendText(msg.from, formatAsText(buildResult(diagnosis, session.location ?? null)));
+  const result = await handleRequest(image, text?.slice(0, MAX_TEXT_CHARS), session.location ?? null);
+  session.diagnosisId = result.diagnosisId;
+  await sendText(msg.from, formatAsText(result));
+}
+
+/** Traduce errores a un mensaje para el usuario; null = no responder nada. */
+function errorReply(err: unknown): string | null {
+  if (err instanceof RateLimitedError) {
+    // Avisamos una sola vez por ventana: responder a cada mensaje de spam también cuesta
+    return err.firstRejection
+      ? `Llegaste al límite de consultas por ahora. Probá de nuevo en ${Math.ceil(err.retryAfterSec / 60)} minutos.`
+      : null;
+  }
+  if (err instanceof BudgetExceededError) return "Estamos con mucha demanda. Probá de nuevo más tarde 🙏";
+  if (err instanceof GuideNotAvailableError) return err.message;
+  if (err instanceof UnsupportedImageError) return "No pude abrir esa imagen. Mandala como foto (JPG o PNG, hasta 5 MB).";
+  console.error("Error procesando mensaje de WhatsApp", err);
+  return "Uy, tuve un problema procesando tu mensaje. ¿Probás de nuevo?";
 }
 
 export function whatsappRouter(): Router {
@@ -112,9 +143,11 @@ export function whatsappRouter(): Router {
     res.sendStatus(200);
     const messages: WaMessage[] = req.body?.entry?.[0]?.changes?.[0]?.value?.messages ?? [];
     for (const msg of messages) {
+      if (seenMessageIds.get(msg.id)) continue;
+      seenMessageIds.set(msg.id, true);
       handleMessage(msg).catch(async (err) => {
-        console.error("Error procesando mensaje de WhatsApp", err);
-        await sendText(msg.from, "Uy, tuve un problema procesando tu mensaje. ¿Probás de nuevo?");
+        const reply = errorReply(err);
+        if (reply) await sendText(msg.from, reply);
       });
     }
   });

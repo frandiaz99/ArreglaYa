@@ -63,6 +63,27 @@ Después de la guía siempre queda el botón "No pude, que venga alguien": el qu
 
 **Monetización posible:** los links de materiales hoy son búsquedas comunes de Mercado Libre; se pueden convertir en links de afiliado una vez aprobado en su programa de afiliados.
 
+## Modelo y costos
+
+Por defecto **diagnóstico y guía usan Claude Haiku 5.5** (US$0,10 / US$0,50 por millón de tokens de entrada / salida): un diagnóstico típico cuesta menos de US$0,001. Se puede cambiar por ruta con `CLAUDE_MODEL_DIAGNOSIS` y `CLAUDE_MODEL_GUIDE` (por ejemplo, Opus 5.5 solo para la guía). Antes de decidir, conviene probar 20-30 fotos reales con cada modelo y comparar.
+
+Haiku no tiene *fallback* del lado del servidor ante rechazos; Opus/Sonnet sí, y el código lo activa automáticamente para esos modelos.
+
+## Seguridad: costos y prompt injection
+
+| Protección | Dónde |
+|---|---|
+| **Límite de gasto en la consola de Anthropic** — el respaldo final, configurarlo siempre | console.anthropic.com → Limits |
+| Presupuesto diario (`DAILY_BUDGET_USD`, por defecto US$5) calculado con el uso real de cada respuesta y guardado en SQLite | `budget.ts`, `pricing.ts` |
+| Límite por IP / número de WhatsApp: 10 diagnósticos y 3 guías por hora (configurable) | `limits.ts` |
+| Texto ≤ 500 caracteres, foto ≤ 5 MB, `max_tokens` 4096 (diagnóstico) / 8192 (guía) | `server.ts`, `diagnose.ts`, `guide.ts` |
+| El diagnóstico queda en el servidor; la guía se pide por ID y se genera una sola vez | `assistant.ts` |
+| WhatsApp: firma de Meta validada, mensajes duplicados descartados, sesiones que vencen a las 24 h, aviso de límite una sola vez | `whatsapp.ts` |
+| Texto del usuario envuelto en `<mensaje_usuario>` y prompts que tratan texto e imagen como datos, no instrucciones | `claude.ts` |
+| La IA nunca elige profesionales ni teléfonos: los agrega el código | `assistant.ts`, `ranking.ts` |
+
+Si se publica la web: poner `TRUST_PROXY` si hay un proxy delante (para que el límite por IP use la IP real) y sumar un captcha invisible (Cloudflare Turnstile). Los límites y diagnósticos viven en memoria: con más de un servidor, moverlos a Redis.
+
 ## Conectar WhatsApp
 
 1. Crear una app en Meta for Developers → producto WhatsApp → número de prueba.

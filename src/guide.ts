@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { askStructured, type ImageInput } from "./claude.js";
+import { askStructured, UNTRUSTED_INPUT_RULES, type ImageInput } from "./claude.js";
+
+const MODEL = process.env.CLAUDE_MODEL_GUIDE ?? "claude-haiku-5-5";
 import type { Diagnosis } from "./diagnose.js";
 
 export const GuideSchema = z.object({
@@ -43,7 +45,9 @@ Reglas:
 - Materiales con los nombres que se usan en ferreterías argentinas (ej.: "cinta de teflón", "flexible para canilla", "cuerito", "sopapa"). Sin marcas.
 - Solo herramientas que hay en una casa común o que se consiguen fácil.
 - Sé honesto en call_a_pro_if: es mejor que el usuario llame a alguien a que empeore el problema.
-- No incluyas precios.`;
+- No incluyas precios.
+
+${UNTRUSTED_INPUT_RULES} En ese caso, safe_to_diy=false.`;
 
 /** Gas y emergencias nunca van por "hacelo vos", diga lo que diga el modelo. */
 export function canOfferGuide(d: Diagnosis): boolean {
@@ -62,6 +66,8 @@ export function mercadoLibreUrl(query: string): string {
 
 export async function buildGuide(diagnosis: Diagnosis, image: ImageInput | null): Promise<GuideWithLinks> {
   const guide = await askStructured({
+    model: MODEL,
+    maxTokens: 8192,
     schema: GuideSchema,
     system: SYSTEM_PROMPT,
     image,

@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { askStructured, type ImageInput } from "./claude.js";
+import { askStructured, UNTRUSTED_INPUT_RULES, wrapUserText, type ImageInput } from "./claude.js";
+
+const MODEL = process.env.CLAUDE_MODEL_DIAGNOSIS ?? "claude-haiku-5-5";
 
 export const TRADES = [
   "plomero",
@@ -47,15 +49,19 @@ El usuario te manda una foto (y a veces un texto) de algo que se rompió o funci
 6. Si la foto no alcanza para un diagnóstico razonable, hacé una sola pregunta concreta en question_for_user.
 
 No inventes precios: los costos dependen de cada profesional y cambian rápido.
-reply_message: 2 a 4 oraciones, tono cercano, sin tecnicismos innecesarios. No listes profesionales: el sistema los agrega después.`;
+reply_message: 2 a 4 oraciones, tono cercano, sin tecnicismos innecesarios. No listes profesionales ni teléfonos: el sistema los agrega después.
+
+${UNTRUSTED_INPUT_RULES} En ese caso, is_home_repair=false.`;
 
 export function diagnose(image: ImageInput | null, text: string | undefined): Promise<Diagnosis> {
   return askStructured({
+    model: MODEL,
     schema: DiagnosisSchema,
     system: SYSTEM_PROMPT,
     image,
-    text: text?.trim() || "Mirá esta foto. ¿Qué problema hay y a quién tengo que llamar?",
+    text: wrapUserText(text?.trim() || "Mirá esta foto. ¿Qué problema hay y a quién tengo que llamar?"),
     // Respuesta de chat: priorizamos latencia
     effort: "low",
+    maxTokens: 4096,
   });
 }

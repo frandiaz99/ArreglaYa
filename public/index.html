@@ -47,7 +47,7 @@
   </div>
   <form id="f">
     <label class="btn" title="Adjuntar foto">📷<input id="photo" type="file" accept="image/*" capture="environment" hidden /></label>
-    <input id="text" type="text" placeholder="Contame qué pasa (opcional)" autocomplete="off" />
+    <input id="text" type="text" placeholder="Contame qué pasa (opcional)" autocomplete="off" maxlength="500" />
     <button>Enviar</button>
   </form>
   <div id="preview"></div>
@@ -96,11 +96,11 @@
       const data = await res.json();
       wait.remove();
       if (!res.ok) { bubble("").textContent = data.error; return; }
-      render(data, file);
+      render(data);
     } catch { wait.textContent = "No me pude conectar. ¿Probás de nuevo?"; }
   };
 
-  function render({ diagnosis: d, providers, guideAvailable }, file) {
+  function render({ diagnosisId, diagnosis: d, providers, guideAvailable }) {
     if (d.safety_warning) bubble("warn").textContent = "⚠️ " + d.safety_warning;
     const m = bubble("");
     m.textContent = d.reply_message;
@@ -111,17 +111,18 @@
     const diy = line(choices, "button", "🔧 Hacelo vos (guía paso a paso)");
     const pro = line(choices, "button", "👷 Prefiero que venga alguien"); pro.className = "alt";
     log.appendChild(choices);
-    diy.onclick = () => { choices.remove(); requestGuide(d, file, providers); };
+    diy.onclick = () => { choices.remove(); requestGuide(diagnosisId, providers); };
     pro.onclick = () => { choices.remove(); renderProviders(providers); };
   }
 
-  async function requestGuide(d, file, providers) {
+  async function requestGuide(diagnosisId, providers) {
     const wait = bubble(""); wait.textContent = "Armando la guía… 🔧";
-    const fd = new FormData();
-    fd.append("diagnosis", JSON.stringify(d));
-    if (file) fd.append("photo", file);
     try {
-      const res = await fetch("/api/guide", { method: "POST", body: fd });
+      const res = await fetch("/api/guide", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diagnosisId }),
+      });
       const g = await res.json();
       wait.remove();
       if (!res.ok) { bubble("").textContent = g.error; renderProviders(providers); return; }
