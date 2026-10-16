@@ -1,0 +1,26 @@
+﻿{
+  "name": "arreglaya",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chat con IA: sacás una foto del problema y te recomienda profesionales de oficio cercanos y bien puntuados.",
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --watch --import tsx src/server.ts",
+    "start": "node --env-file-if-exists=.env --import tsx src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.135.0",
+    "express": "^4.21.2",
+    "multer": "^2.0.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.23",
+    "@types/multer": "^1.4.13",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ArreglaYa</title>
+<style>
+  :root { --bg:#f4f1ea; --card:#fff; --ink:#1d1d1b; --muted:#6b6862; --accent:#e4572e; --me:#1f6f5c; --line:#e3ded3; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#151514; --card:#21201e; --ink:#f1eee8; --muted:#a19d95; --accent:#ff7a4f; --me:#2f8f77; --line:#34322e; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:16px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width:640px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; padding:0 16px; }
+  header { padding:20px 0 12px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:22px; } header h1 span { color:var(--accent); }
+  header p { margin:4px 0 0; color:var(--muted); font-size:14px; }
+  #log { flex:1; padding:16px 0; display:flex; flex-direction:column; gap:12px; }
+  .msg { max-width:88%; padding:10px 14px; border-radius:14px; background:var(--card); border:1px solid var(--line); white-space:pre-wrap; }
+  .me { align-self:flex-end; background:var(--me); color:#fff; border:none; }
+  .me img { display:block; max-width:100%; border-radius:8px; margin-bottom:6px; }
+  .warn { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 12%, var(--card)); font-weight:600; }
+  .pro { display:flex; flex-direction:column; gap:2px; padding:10px 0; border-top:1px solid var(--line); }
+  .pro:first-of-type { border-top:none; }
+  .pro b { font-size:15px; } .pro small { color:var(--muted); }
+  .pro a { color:var(--accent); font-weight:600; text-decoration:none; }
+  form { position:sticky; bottom:0; background:var(--bg); padding:12px 0 16px; display:flex; gap:8px; align-items:center; border-top:1px solid var(--line); }
+  input[type=text] { flex:1; min-width:0; padding:12px; border-radius:12px; border:1px solid var(--line); background:var(--card); color:var(--ink); font:inherit; }
+  button, label.btn { border:none; border-radius:12px; padding:12px 14px; font:inherit; font-weight:600; cursor:pointer; background:var(--accent); color:#fff; }
+  label.btn { background:var(--card); color:var(--ink); border:1px solid var(--line); }
+  #loc { font-size:13px; color:var(--muted); }
+  #preview { font-size:13px; color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Arregla<span>Ya</span></h1>
+    <p>Sacale una foto a lo que se rompió y te digo a quién llamar. <span id="loc">📍 buscando ubicación…</span></p>
+  </header>
+  <div id="log">
+    <div class="msg">¡Hola! 👋 Mandame una foto del problema (una pérdida, un enchufe quemado, una cerradura trabada…) y te recomiendo profesionales cerca tuyo.</div>
+  </div>
+  <form id="f">
+    <label class="btn" title="Adjuntar foto">📷<input id="photo" type="file" accept="image/*" capture="environment" hidden /></label>
+    <input id="text" type="text" placeholder="Contame qué pasa (opcional)" autocomplete="off" />
+    <button>Enviar</button>
+  </form>
+  <div id="preview"></div>
+</main>
+<script>
+  const log = document.getElementById("log");
+  const locEl = document.getElementById("loc");
+  const photo = document.getElementById("photo");
+  const preview = document.getElementById("preview");
+  // Por defecto, el centro de CABA, si el navegador no da ubicación
+  let coords = null;
+  navigator.geolocation?.getCurrentPosition(
+    (p) => { coords = { lat: p.coords.latitude, lng: p.coords.longitude }; locEl.textContent = "📍 ubicación lista"; },
+    () => { coords = { lat: -34.6037, lng: -58.3816 }; locEl.textContent = "📍 usando Obelisco (demo)"; },
+  );
+  photo.onchange = () => { preview.textContent = photo.files[0] ? "Foto: " + photo.files[0].name : ""; };
+
+  function bubble(cls) {
+    const d = document.createElement("div");
+    d.className = "msg " + cls;
+    log.appendChild(d);
+    d.scrollIntoView({ behavior: "smooth" });
+    return d;
+  }
+  function line(parent, tag, text) { const e = document.createElement(tag); e.textContent = text; parent.appendChild(e); return e; }
+
+  document.getElementById("f").onsubmit = async (e) => {
+    e.preventDefault();
+    const text = document.getElementById("text").value;
+    const file = photo.files[0];
+    if (!file && !text.trim()) return;
+
+    const me = bubble("me");
+    if (file) { const img = document.createElement("img"); img.src = URL.createObjectURL(file); me.appendChild(img); }
+    if (text) line(me, "div", text);
+
+    const fd = new FormData();
+    if (file) fd.append("photo", file);
+    fd.append("text", text);
+    if (coords) { fd.append("lat", coords.lat); fd.append("lng", coords.lng); }
+    document.getElementById("text").value = ""; photo.value = ""; preview.textContent = "";
+
+    const wait = bubble(""); wait.textContent = "Mirando la foto… 🔍";
+    try {
+      const res = await fetch("/api/chat", { method: "POST", body: fd });
+      const data = await res.json();
+      wait.remove();
+      if (!res.ok) { bubble("").textContent = data.error; return; }
+      render(data);
+    } catch { wait.textContent = "No me pude conectar. ¿Probás de nuevo?"; }
+  };
+
+  function render({ diagnosis: d, providers }) {
+    if (d.safety_warning) bubble("warn").textContent = "⚠️ " + d.safety_warning;
+    const m = bubble("");
+    m.textContent = d.reply_message;
+    if (d.question_for_user) line(m, "p", d.question_for_user);
+    if (d.diy_possible && d.diy_tips.length) {
+      line(m, "p", "Si querés intentarlo vos:");
+      const ul = document.createElement("ul"); d.diy_tips.forEach((t) => line(ul, "li", t)); m.appendChild(ul);
+    }
+    if (providers.length) {
+      const p = bubble("");
+      line(p, "div", "Te recomiendo:");
+      providers.forEach((r, i) => {
+        const row = document.createElement("div"); row.className = "pro";
+        line(row, "b", `${i + 1}. ${r.provider.name}`);
+        line(row, "small", r.reasons.join(" · "));
+        const a = line(row, "a", "📞 " + r.provider.phone); a.href = "tel:" + r.provider.phone.replace(/\s|-/g, "");
+        p.appendChild(row);
+      });
+    }
+  }
+</script>
+</body>
+</html>
